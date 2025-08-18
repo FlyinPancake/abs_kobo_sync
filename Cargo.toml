@@ -1,0 +1,20 @@
+[package]
+name = "abs_kobo_sync"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.142"
+serde_yml = "0.0.12"
+twelf = { version = "0.15.0", features = ["yaml", "serde_yaml"] }
+reqwest = { version = "0.12", features = [
+    "json",
+    "rustls-tls",
+], default-features = false }
+anyhow = "1.0"
+rust_dotenv = "0.1.2"
+dotenvy = "0.15.7"
+tokio = { version = "1", features = ["full"] }
+poem = "3.1.12"
+poem-openapi = { version = "5.1.16", features = ["rapidoc", "uuid"] }

@@ -1,6 +1,7 @@
 // empty
 
 use serde::Deserialize;
+use uuid::Uuid;
 
 #[derive(Clone, Debug)]
 pub struct AbsClient {
@@ -13,8 +14,10 @@ impl AbsClient {
     /// Create a new client with the given base URL (e.g. "http://localhost:8080/audiobookshelf").
     pub fn new(base_url: impl Into<String>) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder().build()?;
+        let base_url_str = base_url.into();
+        tracing::debug!(base_url = %base_url_str, "creating AbsClient");
         Ok(AbsClient {
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url: base_url_str.trim_end_matches('/').to_string(),
             api_key: None,
             client,
         })
@@ -41,8 +44,10 @@ impl AbsClient {
     }
 
     /// GET /status (no auth required)
+    #[tracing::instrument(level = "debug", skip(self))]
     pub async fn get_status(&self) -> anyhow::Result<StatusResponse> {
         let url = self.url("/status");
+        tracing::debug!(%url, "GET status");
         let mut req = self.client.get(&url);
         if let Some((k, v)) = self.auth_header() {
             req = req.header(&k, &v);
@@ -55,6 +60,7 @@ impl AbsClient {
     }
 
     /// GET /api/items/:id
+    #[tracing::instrument(level = "debug", skip(self))]
     pub async fn get_item(
         &self,
         item_id: &str,
@@ -79,6 +85,7 @@ impl AbsClient {
         }
 
         let url = self.url(&path);
+        tracing::debug!(%url, expanded, include = include.unwrap_or(""), "GET item");
         let mut req = self.client.get(&url);
         if let Some((k, v)) = self.auth_header() {
             req = req.header(&k, &v);
@@ -94,7 +101,7 @@ impl AbsClient {
     /// Example: client.cover_url("ITEM_ID", Some((600, 800)), Some("jpeg"), false)
     pub fn cover_url(
         &self,
-        item_id: &str,
+        item_id: &Uuid,
         size: Option<(u32, u32)>,
         format: Option<&str>,
         raw: bool,
@@ -118,8 +125,10 @@ impl AbsClient {
     }
 
     /// GET /api/libraries
+    #[tracing::instrument(level = "debug", skip(self))]
     pub async fn get_libraries(&self) -> anyhow::Result<LibrariesResponse> {
         let url = self.url("/api/libraries");
+        tracing::debug!(%url, "GET libraries");
         let mut req = self.client.get(&url);
         if let Some((k, v)) = self.auth_header() {
             req = req.header(&k, &v);
@@ -132,6 +141,7 @@ impl AbsClient {
     }
 
     /// GET /api/libraries/{lib_id}/series
+    #[tracing::instrument(level = "debug", skip(self))]
     pub async fn get_library_series(
         &self,
         lib_id: &str,
@@ -140,6 +150,7 @@ impl AbsClient {
         filter: Option<&str>,
     ) -> anyhow::Result<LibrarySeriesResponse> {
         let url = self.url(&format!("/api/libraries/{}/series", lib_id));
+        tracing::debug!(%url, %lib_id, %limit, page = page.unwrap_or(0), filter = filter.unwrap_or("") , "GET library series");
         let req = self.client.get(&url);
         let req = if let Some((k, v)) = self.auth_header() {
             req.header(&k, &v)
@@ -157,6 +168,52 @@ impl AbsClient {
         let body = status.text().await?;
         let parsed: LibrarySeriesResponse = serde_json::from_str(&body)?;
         Ok(parsed)
+    }
+
+    /// GET /api/libraries/{lib_id}/items
+    /// Common useful params: limit, page, include (e.g. "media,media.metadata"), filter
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub async fn get_library_items(
+        &self,
+        lib_id: &str,
+        limit: i64,
+        page: Option<i64>,
+        include: Option<&str>,
+        filter: Option<&str>,
+    ) -> anyhow::Result<LibraryItemsResponse> {
+        let url = self.url(&format!("/api/libraries/{}/items", lib_id));
+        tracing::debug!(%url, %lib_id, %limit, page = page.unwrap_or(0), include = include.unwrap_or("") , filter = filter.unwrap_or("") , "GET library items");
+        let req = self.client.get(&url);
+        let req = if let Some((k, v)) = self.auth_header() {
+            req.header(&k, &v)
+        } else {
+            req
+        };
+        // Build query parameters, keeping things resilient
+        let mut q: Vec<(String, String)> = vec![
+            ("limit".into(), limit.to_string()),
+            ("page".into(), page.unwrap_or(0).to_string()),
+        ];
+        if let Some(inc) = include {
+            q.push(("include".into(), inc.to_string()));
+        }
+        if let Some(f) = filter {
+            q.push(("filter".into(), f.to_string()));
+        }
+        let req = req.query(&q);
+
+        let resp = req.send().await?;
+        let status = resp.error_for_status()?;
+        let body = status.text().await?;
+        match serde_json::from_str::<LibraryItemsResponse>(&body) {
+            Ok(parsed) => Ok(parsed),
+            Err(e) => {
+                let snippet_len = body.len().min(2000);
+                let snippet = &body[..snippet_len];
+                tracing::error!(error = %e, body_snippet = %snippet, "failed to parse LibraryItemsResponse");
+                Err(e.into())
+            }
+        }
     }
 }
 
@@ -185,7 +242,7 @@ pub struct LibrariesResponse {
 
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct Library {
-    pub id: String,
+    pub id: Uuid,
     pub name: String,
     pub folders: Vec<LibraryFolder>,
     #[serde(rename = "displayOrder")]
@@ -233,6 +290,141 @@ pub struct LibrarySeries {
     // pub books: Vec<LibraryBook>,
 }
 
+// ============ Library Items (folders/files) ============
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct LibraryItemsResponse {
+    pub results: Vec<LibraryItem>,
+    pub total: i64,
+    pub limit: i64,
+    pub page: i64,
+    #[serde(rename = "sortDesc")]
+    pub sort_desc: bool,
+    #[serde(rename = "mediaType")]
+    pub media_type: Option<String>,
+    pub minified: Option<bool>,
+    pub collapseseries: Option<bool>,
+    pub include: Option<String>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct LibraryItem {
+    pub id: Uuid,
+    pub ino: Option<String>,
+    #[serde(rename = "oldLibraryItemId")]
+    pub old_library_item_id: Option<String>,
+    #[serde(rename = "libraryId")]
+    pub library_id: String,
+    #[serde(rename = "folderId")]
+    pub folder_id: String,
+    pub path: String,
+    #[serde(rename = "relPath")]
+    pub rel_path: String,
+    #[serde(rename = "isFile")]
+    pub is_file: bool,
+    #[serde(rename = "mtimeMs")]
+    pub mtime_ms: Option<i64>,
+    #[serde(rename = "ctimeMs")]
+    pub ctime_ms: Option<i64>,
+    #[serde(rename = "birthtimeMs")]
+    pub birthtime_ms: Option<i64>,
+    #[serde(rename = "addedAt")]
+    pub added_at: Option<i64>,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: Option<i64>,
+    #[serde(rename = "isMissing")]
+    pub is_missing: Option<bool>,
+    #[serde(rename = "isInvalid")]
+    pub is_invalid: Option<bool>,
+    #[serde(rename = "mediaType")]
+    pub media_type: Option<String>,
+    pub media: Option<Media>,
+    #[serde(rename = "numFiles")]
+    pub num_files: Option<i64>,
+    pub size: Option<i64>,
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct Media {
+    pub id: String,
+    pub metadata: Option<MediaMetadata>,
+    #[serde(rename = "coverPath")]
+    pub cover_path: Option<String>,
+    pub tags: Option<Vec<String>>,
+    #[serde(rename = "numTracks")]
+    pub num_tracks: Option<i64>,
+    #[serde(rename = "numAudioFiles")]
+    pub num_audio_files: Option<i64>,
+    #[serde(rename = "numChapters")]
+    pub num_chapters: Option<i64>,
+    pub duration: Option<f64>,
+    pub size: Option<i64>,
+    #[serde(rename = "ebookFormat")]
+    pub ebook_format: Option<String>,
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct MediaMetadata {
+    pub title: Option<String>,
+    #[serde(rename = "titleIgnorePrefix")]
+    pub title_ignore_prefix: Option<String>,
+    pub subtitle: Option<String>,
+    #[serde(rename = "authorName")]
+    pub author_name: Option<String>,
+    #[serde(rename = "authorNameLF")]
+    pub author_name_lf: Option<String>,
+    #[serde(rename = "narratorName")]
+    pub narrator_name: Option<String>,
+    #[serde(rename = "seriesName")]
+    pub series_name: Option<String>,
+    pub genres: Option<Vec<String>>,
+    #[serde(
+        rename = "publishedYear",
+        deserialize_with = "crate::abs_client::de::opt_i64_from_str_or_num",
+        default
+    )]
+    pub published_year: Option<i64>,
+    #[serde(rename = "publishedDate")]
+    pub published_date: Option<String>,
+    pub publisher: Option<String>,
+    pub description: Option<String>,
+    pub isbn: Option<String>,
+    pub asin: Option<String>,
+    pub language: Option<String>,
+    pub explicit: Option<bool>,
+    pub abridged: Option<bool>,
+}
+
+/// Internal serde helpers
+pub mod de {
+    use serde::{Deserialize, Deserializer};
+
+    /// Accept Option<i64> from either a number or a string like "2011"; null/"" -> None.
+    pub fn opt_i64_from_str_or_num<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum NumOrStr<'a> {
+            Num(i64),
+            Str(&'a str),
+        }
+
+        let val: Option<NumOrStr> = Option::deserialize(deserializer)?;
+        Ok(match val {
+            None => None,
+            Some(NumOrStr::Num(n)) => Some(n),
+            Some(NumOrStr::Str(s)) => s.trim().parse::<i64>().ok(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,10 +432,15 @@ mod tests {
     #[test]
     fn build_cover_url_basic() {
         let c = AbsClient::new("http://localhost:8080/audiobookshelf").unwrap();
-        let url = c.cover_url("abc123", Some((600, 800)), Some("jpeg"), false);
+        let url = c.cover_url(
+            &Uuid::parse_str("22809dbe-3137-4879-831e-d64a6f29b005").unwrap(),
+            Some((600, 800)),
+            Some("jpeg"),
+            false,
+        );
         assert_eq!(
             url,
-            "http://localhost:8080/audiobookshelf/api/items/abc123/cover?width=600&height=800&format=jpeg"
+            "http://localhost:8080/audiobookshelf/api/items/22809dbe-3137-4879-831e-d64a6f29b005/cover?width=600&height=800&format=jpeg"
         );
     }
 
@@ -261,17 +458,99 @@ mod tests {
         let json = r#"
                 {
                     "libraries": [
-                        { "id": "1", "name": "A", "folders": [{ "id": "f1", "fullPath": "/a", "libraryId": "1", "addedAt": 1 }], "displayOrder": 1, "icon": "database", "mediaType": "book", "provider": "audible", "settings": {"coverAspectRatio":1}, "lastScan": 123, "lastScanVersion": "2.27.0", "createdAt": 1, "lastUpdate": 2 },
-                        { "id": "2", "name": "B", "folders": [{ "id": "f2", "fullPath": "/b", "libraryId": "2", "addedAt": 2 }], "displayOrder": 2, "icon": "book-1", "mediaType": "book", "provider": "custom", "settings": {}, "lastScan": 456, "lastScanVersion": "2.25.1", "createdAt": 2, "lastUpdate": 3 },
-                        { "id": "3", "name": "C", "folders": [{ "id": "f3", "fullPath": "/c", "libraryId": "3", "addedAt": 3 }], "displayOrder": 3, "icon": "microphone-1", "mediaType": "podcast", "provider": "itunes", "settings": {}, "lastScan": null, "lastScanVersion": null, "createdAt": 3, "lastUpdate": 3 }
+                        { "id": "22809dbe-3137-4879-831e-d64a6f29b005", "name": "A", "folders": [{ "id": "f1", "fullPath": "/a", "libraryId": "1", "addedAt": 1 }], "displayOrder": 1, "icon": "database", "mediaType": "book", "provider": "audible", "settings": {"coverAspectRatio":1}, "lastScan": 123, "lastScanVersion": "2.27.0", "createdAt": 1, "lastUpdate": 2 },
+                        { "id": "b8df8f4c-5f93-4a10-812b-84ec4cee4389", "name": "B", "folders": [{ "id": "f2", "fullPath": "/b", "libraryId": "2", "addedAt": 2 }], "displayOrder": 2, "icon": "book-1", "mediaType": "book", "provider": "custom", "settings": {}, "lastScan": 456, "lastScanVersion": "2.25.1", "createdAt": 2, "lastUpdate": 3 },
+                        { "id": "33ed2665-4521-4a70-93f1-f49b29e39bfe", "name": "C", "folders": [{ "id": "f3", "fullPath": "/c", "libraryId": "3", "addedAt": 3 }], "displayOrder": 3, "icon": "microphone-1", "mediaType": "podcast", "provider": "itunes", "settings": {}, "lastScan": null, "lastScanVersion": null, "createdAt": 3, "lastUpdate": 3 }
                     ]
                 }
                 "#;
 
         let libs: LibrariesResponse = serde_json::from_str(json).unwrap();
         assert_eq!(libs.libraries.len(), 3);
-        assert_eq!(libs.libraries[0].id, "1");
+        assert_eq!(
+            libs.libraries[0].id,
+            Uuid::parse_str("22809dbe-3137-4879-831e-d64a6f29b005").unwrap()
+        );
         assert_eq!(libs.libraries[0].folders[0].full_path, "/a");
         assert_eq!(libs.libraries[2].media_type.as_deref(), Some("podcast"));
+    }
+
+    #[test]
+    fn library_items_deserialize_example() {
+        let json = r#"{
+    "results": [
+        {
+            "id": "075ebcee-d657-4b01-a96d-b94fadb1898c",
+            "ino": "552891213",
+            "oldLibraryItemId": null,
+            "libraryId": "55b8b4f3-2ec7-460b-8178-e02b8b619c03",
+            "folderId": "381d3393-0028-41fc-95b0-e3a1afb03eec",
+            "path": "/books/Wizards of The Coast",
+            "relPath": "Wizards of The Coast",
+            "isFile": false,
+            "mtimeMs": 1738971721697,
+            "ctimeMs": 1738978324038,
+            "birthtimeMs": 1699116518568,
+            "addedAt": 1703767976342,
+            "updatedAt": 1747214658742,
+            "isMissing": false,
+            "isInvalid": false,
+            "mediaType": "book",
+            "media": {
+                "id": "8f7a211c-767a-40bd-9e96-659a5c5fb6c0",
+                "metadata": {
+                    "title": "Player's Handbook",
+                    "titleIgnorePrefix": "Player's Handbook",
+                    "subtitle": null,
+                    "authorName": "Richard Baker, Jeremy Crawford, Bruce R. Cordell, James Wyatt, Robert J. Schwalb",
+                    "authorNameLF": "Baker, Richard, Crawford, Jeremy, Cordell, Bruce R., Wyatt, James, Schwalb, Robert J.",
+                    "narratorName": "",
+                    "seriesName": "",
+                    "genres": [],
+                    "publishedYear": null,
+                    "publishedDate": null,
+                    "publisher": null,
+                    "description": null,
+                    "isbn": null,
+                    "asin": null,
+                    "language": "English",
+                    "explicit": false,
+                    "abridged": false
+                },
+                "coverPath": "/books/Wizards of The Coast/cover.jpg",
+                "tags": [],
+                "numTracks": 0,
+                "numAudioFiles": 0,
+                "numChapters": 0,
+                "duration": 0,
+                "size": 83430656,
+                "ebookFormat": "pdf"
+            },
+            "numFiles": 3,
+            "size": 150299384
+        }
+    ],
+    "total": 136,
+    "limit": 1,
+    "page": 0,
+    "sortDesc": false,
+    "mediaType": "book",
+    "minified": false,
+    "collapseseries": false,
+    "include": "",
+    "offset": 0
+}"#;
+
+        let parsed: LibraryItemsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.total, 136);
+        assert_eq!(parsed.limit, 1);
+        assert_eq!(parsed.results.len(), 1);
+        let item = &parsed.results[0];
+        assert_eq!(item.is_file, false);
+        assert_eq!(item.media_type.as_deref(), Some("book"));
+        let media = item.media.as_ref().unwrap();
+        assert_eq!(media.ebook_format.as_deref(), Some("pdf"));
+        let title = media.metadata.as_ref().unwrap().title.as_deref();
+        assert_eq!(title, Some("Player's Handbook"));
     }
 }

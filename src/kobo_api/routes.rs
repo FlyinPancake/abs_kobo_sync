@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
+use base64::Engine;
+use chrono::{DateTime, Utc};
+use poem::{FromRequest, Request, RequestBody, http::HeaderValue};
 use poem_openapi::{
     OpenApi,
     param::{Path, Query},
-    payload::PlainText,
+    payload::{Json, PlainText},
 };
 
 use super::models::{
@@ -21,6 +24,8 @@ use crate::abs_client::AbsClient;
 pub struct AbsKoboApi {
     pub client: Arc<AbsClient>,
 }
+
+const KOBO_STOREAPI_URL: &str = "https://storeapi.kobo.com";
 
 #[OpenApi]
 impl AbsKoboApi {
@@ -76,10 +81,15 @@ impl AbsKoboApi {
 
     /// Incremental sync of the user's data
     #[oai(path = "/kobo/:auth_token/v1/library/sync", method = "get")]
-    #[tracing::instrument(level = "debug", skip(self, auth_token))]
-    async fn kobo_sync(&self, auth_token: Path<String>) -> SyncResponseDto {
-        let _ = auth_token; // not used yet
-        SyncService::new(&self.client).sync().await
+    #[tracing::instrument(level = "debug", skip(self, auth_token, kobo_sync_token))]
+    async fn kobo_sync(
+        &self,
+        Path(auth_token): Path<String>,
+        kobo_sync_token: KoboSyncToken,
+    ) -> SyncResponseDto {
+        SyncService::new(&self.client)
+            .sync(&auth_token, kobo_sync_token)
+            .await
     }
 
     /// Metadata for a specific book (array with single object)
@@ -235,9 +245,119 @@ impl AbsKoboApi {
     async fn auth_device(
         &self,
         auth_token: Path<String>,
-        body: poem_openapi::payload::Json<serde_json::Value>,
+        Json(body): Json<serde_json::Value>,
     ) -> DeviceAuthResponseDto {
         let _ = auth_token;
-        SyncService::new(&self.client).auth_device(body.0).await
+        SyncService::new(&self.client).auth_device(body).await
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum KoboSyncToken {
+    NoToken,
+    OnlyRawToken {
+        raw_kobo_store_token: String,
+    },
+    FullToken {
+        raw_kobo_store_token: String,
+        books_last_modified: Option<DateTime<Utc>>,
+        books_last_created: Option<DateTime<Utc>>,
+        archive_last_modified: Option<DateTime<Utc>>,
+        reading_state_last_modified: Option<DateTime<Utc>>,
+        tags_last_modified: Option<DateTime<Utc>>,
+    },
+}
+
+impl KoboSyncToken {
+    const HEADER_NAME: &'static str = "x-kobo-synctoken";
+}
+
+impl<'a> FromRequest<'a> for KoboSyncToken {
+    async fn from_request(req: &'a Request, _body: &mut RequestBody) -> poem::Result<Self> {
+        let token = match req.headers().get(KoboSyncToken::HEADER_NAME) {
+            Some(t) => t.to_str().map_err(|_| {
+                poem::Error::from_string(
+                    "Invalid Kobo sync token format",
+                    poem::http::StatusCode::BAD_REQUEST,
+                )
+            })?,
+            None => return Ok(KoboSyncToken::NoToken),
+        };
+
+        // On the first sync from a Kobo device, we may receive the SyncToken
+        // from the official Kobo store. Without digging too deep into it, that
+        // token is of the form [b64encoded blob].[b64encoded blob 2]
+        if token.contains(".") {
+            return Ok(KoboSyncToken::OnlyRawToken {
+                raw_kobo_store_token: token.to_string(),
+            });
+        }
+
+        // At this point we can assume that the token is a single json object encoded as base64
+        let json = base64::prelude::BASE64_STANDARD
+            .decode(token)
+            .map_err(|_| {
+                poem::Error::from_string(
+                    "Invalid Kobo sync token format",
+                    poem::http::StatusCode::BAD_REQUEST,
+                )
+            })?;
+
+        let values = serde_json::from_slice::<serde_json::Value>(&json).map_err(|_| {
+            poem::Error::from_string(
+                "Invalid Kobo sync token JSON format",
+                poem::http::StatusCode::BAD_REQUEST,
+            )
+        })?;
+
+        let raw_kobo_store_token = match values
+            .get("raw_kobo_store_token")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        {
+            Some(raw_kobo_store_token) => raw_kobo_store_token,
+            None => {
+                return Ok(KoboSyncToken::NoToken);
+            }
+        };
+
+        let books_last_modified = values
+            .get("books_last_modified")
+            .and_then(|v| v.as_str())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+
+        let books_last_created = values
+            .get("books_last_created")
+            .and_then(|v| v.as_str())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+
+        let archive_last_modified = values
+            .get("archive_last_modified")
+            .and_then(|v| v.as_str())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+
+        let reading_state_last_modified = values
+            .get("reading_state_last_modified")
+            .and_then(|v| v.as_str())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+
+        let tags_last_modified = values
+            .get("tags_last_modified")
+            .and_then(|v| v.as_str())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+
+        Ok(KoboSyncToken::FullToken {
+            raw_kobo_store_token,
+            books_last_modified,
+            books_last_created,
+            archive_last_modified,
+            reading_state_last_modified,
+            tags_last_modified,
+        })
     }
 }

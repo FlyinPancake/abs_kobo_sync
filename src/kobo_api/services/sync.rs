@@ -5,9 +5,13 @@ use uuid::Uuid;
 
 use crate::{
     abs_client::AbsClient,
-    kobo_api::models::{
-        DeviceAuthResponseDto, EmptyOkResponseDto, InitializationResponseDto, NoContentResponseDto,
-        SyncResponseDto, TagCreateRequestDto, TagCreateResponseDto, TagItemDto,
+    kobo_api::{
+        models::{
+            DeviceAuthResponseDto, EmptyOkResponseDto, InitializationResponseDto,
+            NoContentResponseDto, SyncResponseDto, TagCreateRequestDto, TagCreateResponseDto,
+            TagItemDto,
+        },
+        routes::KoboSyncToken,
     },
 };
 // no_std: poem-openapi will serialize headers
@@ -22,8 +26,13 @@ impl<'a> SyncService<'a> {
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn sync(&self) -> SyncResponseDto {
+    pub async fn sync(&self, auth_token: &str, kobo_sync_token: KoboSyncToken) -> SyncResponseDto {
         // Minimal stub: no changes; return empty list with a dummy sync token
+        let _ = auth_token;
+
+        tracing::info!("Kobo Sync Token Received");
+        tracing::info!(?kobo_sync_token, "Kobo Sync Token Details");
+
         let token = URL_SAFE_NO_PAD.encode("initial");
         SyncResponseDto::Ok(Json(vec![]), token, None)
     }

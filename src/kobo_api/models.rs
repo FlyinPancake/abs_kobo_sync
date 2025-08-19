@@ -58,6 +58,14 @@ pub enum SyncResponseDto {
         #[oai(header = "X-Kobo-Sync")] Option<String>,
     ),
 
+    /// Unauthorized
+    #[oai(status = 401)]
+    Unauthorized(Json<ErrorDto>),
+
+    /// Forbidden
+    #[oai(status = 403)]
+    Forbidden(Json<ErrorDto>),
+
     /// Upstream or mapping error
     #[oai(status = 502)]
     BadGateway(Json<ErrorDto>),

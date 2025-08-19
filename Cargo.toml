@@ -17,10 +17,17 @@ rust_dotenv = "0.1.2"
 dotenvy = "0.15.7"
 tokio = { version = "1", features = ["full"] }
 poem = "3.1.12"
-poem-openapi = { version = "5.1.16", features = ["rapidoc", "uuid"] }
+poem-openapi = { version = "5.1.16", features = ["rapidoc", "uuid", "chrono"] }
 uuid = { version = "1.18.0", features = ["serde", "v4", "v7"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-error = "0.2"
 base64 = "0.22"
 chrono = { version = "0.4.41", features = ["serde"] }
+sea-orm = { version = "1.1.0", features = [
+    "macros",
+    "sqlx-sqlite",
+    "runtime-tokio-rustls",
+    "with-chrono",
+    "with-uuid",
+] }

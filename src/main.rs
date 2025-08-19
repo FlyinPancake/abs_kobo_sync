@@ -87,6 +87,7 @@ pub async fn run_poem(client: Arc<AbsClient>) -> AbsKoboResult<()> {
     let api = kobo_api::AbsKoboApi { client };
     let api_service =
         OpenApiService::new(api, "ABS Kobo API", version).server("http://localhost:3000");
+    //.extra_request_header(poem_openapi::ExtraHeader::new("X-Abs-Kobo-Version"))
     let ui = api_service.rapidoc();
     let spec = api_service.spec();
     let route = Route::new()

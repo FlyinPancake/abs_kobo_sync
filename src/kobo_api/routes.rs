@@ -260,12 +260,17 @@ pub enum KoboSyncToken {
     },
     FullToken {
         raw_kobo_store_token: String,
-        books_last_modified: Option<DateTime<Utc>>,
-        books_last_created: Option<DateTime<Utc>>,
-        archive_last_modified: Option<DateTime<Utc>>,
-        reading_state_last_modified: Option<DateTime<Utc>>,
-        tags_last_modified: Option<DateTime<Utc>>,
+        details: KoboFullTokenDetails,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct KoboFullTokenDetails {
+    pub books_last_modified: Option<DateTime<Utc>>,
+    pub books_last_created: Option<DateTime<Utc>>,
+    pub archive_last_modified: Option<DateTime<Utc>>,
+    pub reading_state_last_modified: Option<DateTime<Utc>>,
+    pub tags_last_modified: Option<DateTime<Utc>>,
 }
 
 impl KoboSyncToken {
@@ -353,11 +358,13 @@ impl<'a> FromRequest<'a> for KoboSyncToken {
 
         Ok(KoboSyncToken::FullToken {
             raw_kobo_store_token,
-            books_last_modified,
-            books_last_created,
-            archive_last_modified,
-            reading_state_last_modified,
-            tags_last_modified,
+            details: KoboFullTokenDetails {
+                books_last_modified,
+                books_last_created,
+                archive_last_modified,
+                reading_state_last_modified,
+                tags_last_modified,
+            },
         })
     }
 }

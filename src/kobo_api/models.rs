@@ -1,4 +1,6 @@
-use poem_openapi::{ApiResponse, Object, payload::Json};
+use std::ffi::os_str::Display;
+
+use poem_openapi::{ApiResponse, Enum, Object, payload::Json};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Object)]
@@ -53,9 +55,10 @@ pub enum SyncResponseDto {
     /// Sync items successfully retrieved
     #[oai(status = 200)]
     Ok(
-        Json<Vec<serde_json::Value>>,
-        #[oai(header = "X-Kobo-SyncToken")] String,
+        Json<Vec<crate::kobo_api::services::sync::KoboSyncEntitlement>>,
         #[oai(header = "X-Kobo-Sync")] Option<String>,
+        #[oai(header = "X-Kobo-Sync-Mode")] Option<String>,
+        #[oai(header = "X-Kobo-Recent-Reads")] Option<String>,
     ),
 
     /// Unauthorized
@@ -167,4 +170,19 @@ pub enum NotImplementedResponseDto {
     /// Feature not implemented yet
     #[oai(status = 501)]
     NotImplemented(Json<ErrorDto>),
+}
+
+#[derive(Debug, Clone, Enum)]
+pub enum BookFormatDto {
+    Epub,
+    Kepub,
+}
+
+impl ToString for BookFormatDto {
+    fn to_string(&self) -> String {
+        match self {
+            BookFormatDto::Epub => "epub".into(),
+            BookFormatDto::Kepub => "kepub".into(),
+        }
+    }
 }

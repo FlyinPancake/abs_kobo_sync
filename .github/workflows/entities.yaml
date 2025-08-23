@@ -10,6 +10,8 @@ jobs:
   generate-entities:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
       - name: Install just
         uses: extractions/setup-just@v3
         with:
@@ -19,7 +21,7 @@ jobs:
       - name: Install cargo binstall
         uses: cargo-bins/cargo-binstall@main
       - name: Install sea-orm-cli
-        run: cargo binstall sea-orm-cli
+        run: cargo binstall sea-orm-cli -y
       - name: Create sqlite database and generate entities
         run: |
           just migrate

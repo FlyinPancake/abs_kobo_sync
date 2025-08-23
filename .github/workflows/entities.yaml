@@ -1,0 +1,38 @@
+name: Check Database Entities
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+jobs:
+  generate-entities:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install just
+        uses: extractions/setup-just@v3
+        with:
+          just-version: '1.42.3'
+      - name: Install rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install cargo binstall
+        uses: cargo-bins/cargo-binstall@main
+      - name: Install sea-orm-cli
+        run: cargo binstall sea-orm-cli
+      - name: Create sqlite database and generate entities
+        run: |
+          just migrate
+          just generate_entities
+      - name: Ensure entities are up to date
+        run: |
+          if [ -n "$(git status --porcelain src/entities)" ]; then
+            echo "Entities are not up to date. Please run 'just generate_entities' and commit the changes."
+            git status
+            exit 1
+          else
+            echo "Entities are up to date."
+          fi
+            
+
+

@@ -1,8 +1,11 @@
 use poem_openapi::payload::Json;
+use uuid::Uuid;
 
 use crate::{
     abs_client::AbsClient,
-    kobo_api::models::{ErrorDto, LibraryDto, LibraryItemDto, LibraryItemsResponseDto, LibraryListResponse},
+    kobo_api::models::{
+        ErrorDto, LibraryDto, LibraryItemDto, LibraryItemsResponseDto, LibraryListResponse,
+    },
 };
 
 pub struct LibraryService<'a> {
@@ -21,13 +24,19 @@ impl<'a> LibraryService<'a> {
                 let dtos = libs
                     .libraries
                     .into_iter()
-                    .map(|l| LibraryDto { id: l.id, name: l.name, media_type: l.media_type })
+                    .map(|l| LibraryDto {
+                        id: l.id,
+                        name: l.name,
+                        media_type: l.media_type,
+                    })
                     .collect();
                 LibraryListResponse::Ok(Json(dtos))
             }
             Err(e) => {
                 tracing::error!(error = %format!("{:?}", e), "failed to list libraries");
-                LibraryListResponse::BadGateway(Json(ErrorDto { message: format!("ABS error: {}", e) }))
+                LibraryListResponse::BadGateway(Json(ErrorDto {
+                    message: format!("ABS error: {}", e),
+                }))
             }
         }
     }
@@ -36,7 +45,7 @@ impl<'a> LibraryService<'a> {
     #[tracing::instrument(level = "debug", skip(self, include, filter))]
     pub async fn list_library_items(
         &self,
-        library_id: &str,
+        library_id: &Uuid,
         limit: i64,
         page: Option<i64>,
         include: Option<&str>,
@@ -53,16 +62,25 @@ impl<'a> LibraryService<'a> {
                     .results
                     .into_iter()
                     .map(|it| {
-                        let (title, author, series, cover_url, ebook_format) = if let Some(media) = it.media {
-                            let title = media.metadata.as_ref().and_then(|m| m.title.clone());
-                            let author = media.metadata.as_ref().and_then(|m| m.author_name.clone());
-                            let series = media.metadata.as_ref().and_then(|m| m.series_name.clone());
-                            let cover_url = media.cover_path.map(|p| p);
-                            let ebook_format = media.ebook_format;
-                            (title, author, series, cover_url, ebook_format)
-                        } else {
-                            (None, None, None, None, None)
-                        };
+                        let title = it
+                            .media
+                            .metadata
+                            .title
+                            .unwrap_or("Unknown Title".to_string());
+                        let author = Some(
+                            it.media
+                                .metadata
+                                .author_name
+                                .unwrap_or("Unknown Author".to_string()),
+                        );
+                        let series = Some(
+                            it.media
+                                .metadata
+                                .series_name
+                                .unwrap_or("Unknown Series".to_string()),
+                        );
+                        let cover_url = Some(it.media.cover_path.unwrap_or("".to_string()));
+                        let ebook_format = it.media.ebook_format.as_deref().map(|f| f.to_string());
 
                         // Prefer using cover_url helper which builds the public URL
                         let computed_cover = Some(self.client.cover_url(&it.id, None, None, false));
@@ -81,7 +99,9 @@ impl<'a> LibraryService<'a> {
             }
             Err(e) => {
                 tracing::error!(error = %format!("{:?}", e), library_id=%library_id, "failed to list items");
-                LibraryItemsResponseDto::BadGateway(Json(ErrorDto { message: format!("ABS error: {}", e) }))
+                LibraryItemsResponseDto::BadGateway(Json(ErrorDto {
+                    message: format!("ABS error: {}", e),
+                }))
             }
         }
     }

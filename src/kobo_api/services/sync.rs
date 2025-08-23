@@ -1,13 +1,13 @@
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{DateTime, Utc};
-use poem::web::headers::Date;
+use chrono::{DateTime, TimeZone, Utc};
 use poem_openapi::{Enum, Object, Union, payload::Json};
-use serde::de;
+use sea_orm::DatabaseConnection;
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    abs_client::AbsClient,
+    AbsKoboResult,
+    abs_client::{AbsClient, LibraryItem},
+    config::Config,
     kobo_api::{
         models::{
             BookFormatDto, DeviceAuthResponseDto, EmptyOkResponseDto, InitializationResponseDto,
@@ -21,11 +21,21 @@ use crate::{
 
 pub struct SyncService<'a> {
     pub abs_client: &'a AbsClient,
+    pub config: &'a Config,
+    pub db: &'a DatabaseConnection,
+}
+
+fn timestamp_to_utc(timestamp: i64) -> DateTime<Utc> {
+    Utc.timestamp_opt(timestamp, 0).unwrap()
 }
 
 impl<'a> SyncService<'a> {
-    pub fn new(abs_client: &'a AbsClient) -> Self {
-        Self { abs_client }
+    pub fn new(abs_client: &'a AbsClient, config: &'a Config, db: &'a DatabaseConnection) -> Self {
+        Self {
+            abs_client,
+            config,
+            db,
+        }
     }
 
     // TODO: replace with actual urls
@@ -40,17 +50,48 @@ impl<'a> SyncService<'a> {
 
     const SYNC_ITEM_LIMIT: i64 = 100;
 
-    #[tracing::instrument(level = "debug", skip(self, auth_token))]
-    fn collect_sync_items(&self, auth_token: &str) -> Vec<SyncResult> {
-        // TODO: implement actual sync item collection logic
+    #[tracing::instrument(level = "debug", skip(self, _auth_token, books_last_modified))]
+    async fn collect_all_books(
+        &self,
+        _auth_token: &str,
+        books_last_modified: &Option<DateTime<Utc>>,
+    ) -> AbsKoboResult<Vec<LibraryItem>> {
+        let books = self
+            .abs_client
+            .get_library_items(&self.config.library_id, 0, None, None, None)
+            .await?;
 
-        todo!("Implement sync item collection")
+        let book_list = books.results.into_iter().filter(|item| {
+            // Filter books based on last modified date
+            let added_date = Utc.timestamp_opt(item.added_at, 0).unwrap();
+
+            let is_recent = if let Some(last_modified) = books_last_modified {
+                added_date > *last_modified
+            } else {
+                true // If no last modified date, include all books
+            };
+            let has_epub = item.media.ebook_format == Some("epub".to_string());
+            is_recent && has_epub
+        });
+
+        let library_items: Vec<LibraryItem> = book_list.collect();
+
+        Ok(library_items)
     }
 
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn sync(&self, auth_token: &str, kobo_sync_token: KoboSyncToken) -> SyncResponseDto {
+    pub async fn sync(&self, auth_token: &str, raw_kobo_sync_token: String) -> SyncResponseDto {
         // Minimal stub: no changes; return empty list with a dummy sync token
         let _ = auth_token;
+        let kobo_sync_token = match KoboSyncToken::from_request(&raw_kobo_sync_token) {
+            Ok(token) => token,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to parse Kobo Sync Token");
+                return SyncResponseDto::Forbidden(Json(crate::kobo_api::models::ErrorDto {
+                    message: format!("Invalid Kobo Sync Token: {}", e),
+                }));
+            }
+        };
 
         tracing::info!("Kobo Sync Token Received");
         tracing::info!(?kobo_sync_token, "Kobo Sync Token Details");
@@ -98,10 +139,132 @@ impl<'a> SyncService<'a> {
 
         let archive_last_modified: Option<DateTime<Utc>> = None;
 
-        let sync_results = self.collect_sync_items(auth_token);
+        let sync_results = match self
+            .collect_all_books(auth_token, &books_last_modified)
+            .await
+        {
+            Ok(results) => results,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to collect books for sync");
+                return SyncResponseDto::BadGateway(Json(crate::kobo_api::models::ErrorDto {
+                    message: format!("Failed to collect books for sync: {}", e),
+                }));
+            }
+        };
 
-        let token = URL_SAFE_NO_PAD.encode("initial");
-        SyncResponseDto::Ok(Json(vec![]), None, None, None)
+        let entitlements = sync_results.iter().map(|result| {
+            let download_urls =
+                vec![self.get_download_url_for_book(&result.id, &BookFormatDto::Kepub)];
+
+            let reading_state = None;
+
+            let book = KoboSyncedBook {
+                book_entitlement: BookEntitlement {
+                    accessibility: "Full".to_string(),
+                    active_period: ActivePeriod { from: Utc::now() },
+                    created: timestamp_to_utc(result.added_at),
+                    cross_revision_id: result.id,
+                    id: result.id,
+                    is_removed: false,
+                    is_hidden_from_archive: false,
+                    is_locked: false,
+                    last_modified: timestamp_to_utc(result.updated_at),
+                    origin_category: "Imported".to_string(),
+                    revision_id: result.id,
+                    status: "Active".to_string(),
+                },
+                book_metadata: BookMetadata {
+                    categories: vec![
+                        Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                    ],
+                    cover_image_id: result.id,
+                    cross_revision_id: result.id,
+                    current_display_price: Default::default(),
+                    current_love_display_price: Default::default(),
+                    description: result.media.metadata.description.clone(),
+                    download_urls,
+                    entitlement_id: result.id,
+                    external_ids: vec![],
+                    genre: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                    is_eligible_for_kobo_love: false,
+                    is_internet_archive: false,
+                    is_pre_order: false,
+                    is_social_enabled: true,
+                    language: result
+                        .media
+                        .metadata
+                        .language
+                        .clone()
+                        .unwrap_or("en".to_string()),
+                    phonetic_pronunciations: PhoneticPronounciations {},
+                    publication_date: DateTime::parse_from_rfc3339(
+                        &result
+                            .media
+                            .metadata
+                            .published_date
+                            .clone()
+                            .unwrap_or("1970-01-01T00:00:00Z".to_string()),
+                    )
+                    .unwrap()
+                    .to_utc(),
+                    revision_id: result.id,
+                    title: result
+                        .media
+                        .metadata
+                        .title
+                        .clone()
+                        .unwrap_or("Untitled".to_string()),
+                    work_id: result.id,
+                    contributors: result
+                        .media
+                        .metadata
+                        .author_name
+                        .clone()
+                        .map(|author| author.split(',').map(|s| s.trim().to_string()).collect()),
+                    contributor_roles: result.media.metadata.author_name.clone().map(|author| {
+                        author
+                            .split(',')
+                            .map(|s| KoboSyncedContributorRole {
+                                name: s.trim().to_string(),
+                            })
+                            .collect()
+                    }),
+                    series: KoboSyncedSeries {
+                        name: result
+                            .media
+                            .metadata
+                            .series_name
+                            .clone()
+                            .unwrap_or("".to_string()),
+                        number: 1f64,
+                        number_float: 1f64,
+                        id: Uuid::new_v3(
+                            &Uuid::NAMESPACE_DNS,
+                            &result
+                                .media
+                                .metadata
+                                .series_name
+                                .clone()
+                                .unwrap_or("".to_string())
+                                .as_bytes(),
+                        ),
+                    },
+                },
+                reading_state,
+            };
+            book
+        });
+
+        let entitlements = entitlements
+            .into_iter()
+            .map(|entitlement| {
+                KoboSyncEntitlement::NewEntitlement(NewEntitlement {
+                    new_entitlement: entitlement,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        SyncResponseDto::Ok(Json(entitlements), None, None, None)
     }
 
     #[tracing::instrument(level = "debug", skip(self, req))]
@@ -194,6 +357,7 @@ pub struct BookEntitlement {
     active_period: ActivePeriod,
     created: DateTime<Utc>,
     cross_revision_id: Uuid,
+    id: Uuid,
     is_removed: bool,
     is_hidden_from_archive: bool,
     is_locked: bool,
@@ -232,8 +396,8 @@ pub struct BookMetadata {
     revision_id: Uuid,
     title: String,
     work_id: Uuid,
-    contributors: Vec<String>,
-    contributor_roles: Vec<KoboSyncedContributorRole>,
+    contributors: Option<Vec<String>>,
+    contributor_roles: Option<Vec<KoboSyncedContributorRole>>,
     series: KoboSyncedSeries,
 }
 

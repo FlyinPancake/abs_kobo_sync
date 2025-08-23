@@ -13,7 +13,7 @@ pub struct LibraryDto {
 #[derive(Debug, Clone, Object)]
 pub struct LibraryItemDto {
     pub id: Uuid,
-    pub title: Option<String>,
+    pub title: String,
     pub author: Option<String>,
     pub series: Option<String>,
     pub cover_url: Option<String>,

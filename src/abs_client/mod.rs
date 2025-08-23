@@ -175,7 +175,7 @@ impl AbsClient {
     #[tracing::instrument(level = "debug", skip(self))]
     pub async fn get_library_items(
         &self,
-        lib_id: &str,
+        lib_id: &Uuid,
         limit: i64,
         page: Option<i64>,
         include: Option<&str>,
@@ -293,103 +293,91 @@ pub struct LibrarySeries {
 // ============ Library Items (folders/files) ============
 
 #[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct LibraryItemsResponse {
     pub results: Vec<LibraryItem>,
     pub total: i64,
     pub limit: i64,
     pub page: i64,
-    #[serde(rename = "sortDesc")]
     pub sort_desc: bool,
-    #[serde(rename = "mediaType")]
-    pub media_type: Option<String>,
-    pub minified: Option<bool>,
-    pub collapseseries: Option<bool>,
+    pub media_type: LibraryMediaType,
+    pub minified: bool,
+    pub collapseseries: bool,
     pub include: Option<String>,
-    pub offset: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum LibraryMediaType {
+    Book,
+    Podcast,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct LibraryItem {
     pub id: Uuid,
-    pub ino: Option<String>,
-    #[serde(rename = "oldLibraryItemId")]
+    pub ino: String,
     pub old_library_item_id: Option<String>,
-    #[serde(rename = "libraryId")]
     pub library_id: String,
-    #[serde(rename = "folderId")]
     pub folder_id: String,
     pub path: String,
-    #[serde(rename = "relPath")]
     pub rel_path: String,
-    #[serde(rename = "isFile")]
     pub is_file: bool,
-    #[serde(rename = "mtimeMs")]
-    pub mtime_ms: Option<i64>,
-    #[serde(rename = "ctimeMs")]
-    pub ctime_ms: Option<i64>,
-    #[serde(rename = "birthtimeMs")]
-    pub birthtime_ms: Option<i64>,
-    #[serde(rename = "addedAt")]
-    pub added_at: Option<i64>,
-    #[serde(rename = "updatedAt")]
-    pub updated_at: Option<i64>,
-    #[serde(rename = "isMissing")]
-    pub is_missing: Option<bool>,
-    #[serde(rename = "isInvalid")]
-    pub is_invalid: Option<bool>,
-    #[serde(rename = "mediaType")]
-    pub media_type: Option<String>,
-    pub media: Option<Media>,
-    #[serde(rename = "numFiles")]
-    pub num_files: Option<i64>,
-    pub size: Option<i64>,
+    /// The time when the library item was last modified on disk
+    pub mtime_ms: i64,
+    /// The time when the library item status was changed on disk
+    pub ctime_ms: i64,
+    /// The time when the library item was created on disk
+    pub birthtime_ms: i64,
+    /// The time when the library item was added to the library
+    pub added_at: i64,
+    /// The time when the library item was last updated (Read Only)
+    pub updated_at: i64,
+    pub is_missing: bool,
+    pub is_invalid: bool,
+    pub media_type: String,
+    pub media: Media,
+    pub num_files: i64,
+    pub size: i64,
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct Media {
     pub id: String,
-    pub metadata: Option<MediaMetadata>,
-    #[serde(rename = "coverPath")]
+    pub metadata: BookMetadata,
     pub cover_path: Option<String>,
-    pub tags: Option<Vec<String>>,
-    #[serde(rename = "numTracks")]
-    pub num_tracks: Option<i64>,
-    #[serde(rename = "numAudioFiles")]
-    pub num_audio_files: Option<i64>,
-    #[serde(rename = "numChapters")]
-    pub num_chapters: Option<i64>,
-    pub duration: Option<f64>,
-    pub size: Option<i64>,
-    #[serde(rename = "ebookFormat")]
+    pub tags: Vec<String>,
+    pub num_tracks: i64,
+    pub num_audio_files: i64,
+    pub num_chapters: i64,
+    pub duration: f64,
+    pub size: i64,
     pub ebook_format: Option<String>,
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
-pub struct MediaMetadata {
+#[serde(rename_all = "camelCase")]
+pub struct BookMetadata {
     pub title: Option<String>,
-    #[serde(rename = "titleIgnorePrefix")]
-    pub title_ignore_prefix: Option<String>,
     pub subtitle: Option<String>,
-    #[serde(rename = "authorName")]
+    pub title_ignore_prefix: Option<String>,
     pub author_name: Option<String>,
-    #[serde(rename = "authorNameLF")]
     pub author_name_lf: Option<String>,
-    #[serde(rename = "narratorName")]
+
     pub narrator_name: Option<String>,
-    #[serde(rename = "seriesName")]
     pub series_name: Option<String>,
-    pub genres: Option<Vec<String>>,
+    pub genres: Vec<String>,
     #[serde(
-        rename = "publishedYear",
         deserialize_with = "crate::abs_client::de::opt_i64_from_str_or_num",
         default
     )]
     pub published_year: Option<i64>,
-    #[serde(rename = "publishedDate")]
     pub published_date: Option<String>,
     pub publisher: Option<String>,
     pub description: Option<String>,
@@ -547,10 +535,9 @@ mod tests {
         assert_eq!(parsed.results.len(), 1);
         let item = &parsed.results[0];
         assert_eq!(item.is_file, false);
-        assert_eq!(item.media_type.as_deref(), Some("book"));
-        let media = item.media.as_ref().unwrap();
-        assert_eq!(media.ebook_format.as_deref(), Some("pdf"));
-        let title = media.metadata.as_ref().unwrap().title.as_deref();
+        assert_eq!(item.media_type, "book");
+        assert_eq!(item.media.ebook_format.as_deref(), Some("pdf"));
+        let title = item.media.metadata.title.as_deref();
         assert_eq!(title, Some("Player's Handbook"));
     }
 }

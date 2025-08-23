@@ -5,13 +5,16 @@ mod kobo_api;
 use std::{path::Path, sync::Arc};
 
 use abs_client::AbsClient;
+use anyhow::Context;
 use config::Config;
+use migration::MigratorTrait;
 use poem::{
     EndpointExt, Route, Server,
     listener::TcpListener,
     middleware::{Cors, Tracing as PoemTracing},
 };
 use poem_openapi::OpenApiService;
+use sea_orm::Database;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{EnvFilter, fmt::SubscriberBuilder, prelude::*};
 
@@ -50,6 +53,15 @@ async fn main() -> AbsKoboResult<()> {
             return Err(anyhow::anyhow!(e));
         }
     }
+
+    let db_conn = Database::connect(&config.db_connection_string)
+        .await
+        .with_context(|| "Failed to connect to database")?;
+
+    migration::Migrator::up(&db_conn, None)
+        .await
+        .with_context(|| "Failed to run database migrations")?;
+
     let client = AbsClient::new(&config.abs_base_url)?.with_api_key(&config.abs_api_key);
     let has_api_key = !config.abs_api_key.is_empty();
     tracing::info!(abs_base = %config.abs_base_url, has_api_key, "configured ABS client");
@@ -78,13 +90,17 @@ async fn main() -> AbsKoboResult<()> {
     // for s in series.results {
     //     eprintln!("  {}", s.name);
     // }
-    run_poem(Arc::new(client)).await?;
+    run_poem(Arc::new(client), Arc::new(config), Arc::new(db_conn)).await?;
     Ok(())
 }
 
-pub async fn run_poem(client: Arc<AbsClient>) -> AbsKoboResult<()> {
+pub async fn run_poem(
+    client: Arc<AbsClient>,
+    config: Arc<Config>,
+    db: Arc<sea_orm::DatabaseConnection>,
+) -> AbsKoboResult<()> {
     let version = env!("CARGO_PKG_VERSION");
-    let api = kobo_api::AbsKoboApi { client };
+    let api = kobo_api::AbsKoboApi { client, config, db };
     let api_service =
         OpenApiService::new(api, "ABS Kobo API", version).server("http://localhost:3000");
     //.extra_request_header(poem_openapi::ExtraHeader::new("X-Abs-Kobo-Version"))

@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use poem::{FromRequest, Request, RequestBody, http::HeaderValue};
 use poem_openapi::{
-    OpenApi,
-    param::{Path, Query},
+    OpenApi, Tags,
+    param::{Header, Path, Query},
     payload::{Json, PlainText},
 };
+use uuid::Uuid;
 
 use super::models::{
     DeviceAuthResponseDto, EmptyOkResponseDto, InitializationResponseDto, LibraryItemsResponseDto,
@@ -19,43 +19,52 @@ use super::services::{
     health::HealthService, library::LibraryService, metadata::MetadataService,
     reading::ReadingService, sync::SyncService,
 };
-use crate::abs_client::AbsClient;
+use crate::{abs_client::AbsClient, config::Config};
 
 pub struct AbsKoboApi {
     pub client: Arc<AbsClient>,
+    pub config: Arc<Config>,
+    pub db: Arc<sea_orm::DatabaseConnection>,
+}
+
+#[derive(Debug, Tags)]
+pub enum ApiTags {
+    UserManagement,
+    DeviceManagement,
+    KoboSync,
+    Health,
+    #[oai(rename = "Explore ABS Server")]
+    ExploreAbs,
 }
 
 const KOBO_STOREAPI_URL: &str = "https://storeapi.kobo.com";
 
 #[OpenApi]
 impl AbsKoboApi {
-    // /test endpoint
-    #[oai(path = "/test", method = "get")]
-    #[tracing::instrument(level = "debug", skip(self))]
-    async fn test(&self) -> PlainText<String> {
-        PlainText("Hello, world!".to_string())
-    }
-
-    // Example endpoint that uses the injected ABS client
-    #[oai(path = "/status", method = "get")]
+    /// Get the health status of the API
+    #[oai(path = "/status", method = "get", tag = "ApiTags::Health")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn status(&self) -> PlainText<String> {
         tracing::debug!("handling /status");
         HealthService::new(&self.client).status_text().await
     }
 
-    #[oai(path = "/v1/libraries", method = "get")]
+    #[oai(path = "/v1/libraries", method = "get", tag = "ApiTags::ExploreAbs")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn list_libraries(&self) -> LibraryListResponse {
         LibraryService::new(&self.client).list_libraries().await
     }
 
-    // New: list items in a library
-    #[oai(path = "/v1/libraries/:library_id/items", method = "get")]
+    /// List items in a library
+    #[oai(
+        path = "/v1/libraries/:library_id/items",
+        method = "get",
+        tag = "ApiTags::ExploreAbs"
+    )]
     #[tracing::instrument(level = "debug", skip(self, library_id, limit, page, include, filter))]
     async fn list_library_items(
         &self,
-        library_id: Path<String>,
+        library_id: Path<Uuid>,
         /// Max items per page (default 50)
         Query(limit): Query<Option<i64>>,
         /// Page number starting at 0
@@ -80,14 +89,18 @@ impl AbsKoboApi {
     // ===== Kobo sync endpoints =====
 
     /// Incremental sync of the user's data
-    #[oai(path = "/kobo/:auth_token/v1/library/sync", method = "get")]
+    #[oai(
+        path = "/kobo/:auth_token/v1/library/sync",
+        method = "get",
+        tag = "ApiTags::KoboSync"
+    )]
     #[tracing::instrument(level = "debug", skip(self, auth_token, kobo_sync_token))]
     async fn kobo_sync(
         &self,
         Path(auth_token): Path<String>,
-        kobo_sync_token: KoboSyncToken,
+        #[oai(name = "X-Kobo-Sync-Token")] Header(kobo_sync_token): Header<String>,
     ) -> SyncResponseDto {
-        SyncService::new(&self.client)
+        SyncService::new(&self.client, &self.config, &self.db)
             .sync(&auth_token, kobo_sync_token)
             .await
     }
@@ -95,7 +108,8 @@ impl AbsKoboApi {
     /// Metadata for a specific book (array with single object)
     #[oai(
         path = "/kobo/:auth_token/v1/library/:book_uuid/metadata",
-        method = "get"
+        method = "get",
+        tag = "ApiTags::KoboSync"
     )]
     #[tracing::instrument(level = "debug", skip(self, auth_token, book_uuid))]
     async fn book_metadata(
@@ -110,7 +124,11 @@ impl AbsKoboApi {
     }
 
     /// Get reading state for a specific book (array with single object)
-    #[oai(path = "/kobo/:auth_token/v1/library/:book_uuid/state", method = "get")]
+    #[oai(
+        path = "/kobo/:auth_token/v1/library/:book_uuid/state",
+        method = "get",
+        tag = "ApiTags::KoboSync"
+    )]
     #[tracing::instrument(level = "debug", skip(self, auth_token, book_uuid))]
     async fn get_reading_state(
         &self,
@@ -124,7 +142,11 @@ impl AbsKoboApi {
     }
 
     /// Update reading state for a specific book
-    #[oai(path = "/kobo/:auth_token/v1/library/:book_uuid/state", method = "put")]
+    #[oai(
+        path = "/kobo/:auth_token/v1/library/:book_uuid/state",
+        method = "put",
+        tag = "ApiTags::KoboSync"
+    )]
     #[tracing::instrument(level = "debug", skip(self, auth_token, book_uuid, body))]
     async fn put_reading_state(
         &self,
@@ -139,7 +161,11 @@ impl AbsKoboApi {
     }
 
     /// Create shelf (tag)
-    #[oai(path = "/kobo/:auth_token/v1/library/tags", method = "post")]
+    #[oai(
+        path = "/kobo/:auth_token/v1/library/tags",
+        method = "post",
+        tag = "ApiTags::KoboSync"
+    )]
     #[tracing::instrument(level = "debug", skip(self, auth_token, body))]
     async fn create_tag(
         &self,
@@ -147,11 +173,17 @@ impl AbsKoboApi {
         body: poem_openapi::payload::Json<TagCreateRequestDto>,
     ) -> TagCreateResponseDto {
         let _ = auth_token;
-        SyncService::new(&self.client).create_tag(body.0).await
+        SyncService::new(&self.client, &self.config, &self.db)
+            .create_tag(body.0)
+            .await
     }
 
     /// Rename shelf (tag)
-    #[oai(path = "/kobo/:auth_token/v1/library/tags/:tag_id", method = "put")]
+    #[oai(
+        path = "/kobo/:auth_token/v1/library/tags/:tag_id",
+        method = "put",
+        tag = "ApiTags::KoboSync"
+    )]
     #[tracing::instrument(level = "debug", skip(self, auth_token, tag_id, body))]
     async fn rename_tag(
         &self,
@@ -166,13 +198,17 @@ impl AbsKoboApi {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        SyncService::new(&self.client)
+        SyncService::new(&self.client, &self.config, &self.db)
             .rename_tag(&tag_id.0, &name)
             .await
     }
 
     /// Delete shelf (tag)
-    #[oai(path = "/kobo/:auth_token/v1/library/tags/:tag_id", method = "delete")]
+    #[oai(
+        path = "/kobo/:auth_token/v1/library/tags/:tag_id",
+        method = "delete",
+        tag = "ApiTags::KoboSync"
+    )]
     #[tracing::instrument(level = "debug", skip(self, auth_token, tag_id))]
     async fn delete_tag(
         &self,
@@ -180,13 +216,16 @@ impl AbsKoboApi {
         tag_id: Path<String>,
     ) -> EmptyOkResponseDto {
         let _ = auth_token;
-        SyncService::new(&self.client).delete_tag(&tag_id.0).await
+        SyncService::new(&self.client, &self.config, &self.db)
+            .delete_tag(&tag_id.0)
+            .await
     }
 
     /// Add items to shelf
     #[oai(
         path = "/kobo/:auth_token/v1/library/tags/:tag_id/items",
-        method = "post"
+        method = "post",
+        tag = "ApiTags::KoboSync"
     )]
     #[tracing::instrument(level = "debug", skip(self, auth_token, tag_id, body))]
     async fn add_tag_items(
@@ -196,7 +235,7 @@ impl AbsKoboApi {
         body: poem_openapi::payload::Json<TagItemsRequestDto>,
     ) -> EmptyOkResponseDto {
         let _ = auth_token;
-        SyncService::new(&self.client)
+        SyncService::new(&self.client, &self.config, &self.db)
             .add_tag_items(&tag_id.0, body.0.items)
             .await
     }
@@ -204,7 +243,8 @@ impl AbsKoboApi {
     /// Remove items from shelf
     #[oai(
         path = "/kobo/:auth_token/v1/library/tags/:tag_id/items/delete",
-        method = "post"
+        method = "post",
+        tag = "ApiTags::KoboSync"
     )]
     #[tracing::instrument(level = "debug", skip(self, auth_token, tag_id, body))]
     async fn remove_tag_items(
@@ -214,13 +254,17 @@ impl AbsKoboApi {
         body: poem_openapi::payload::Json<TagItemsRequestDto>,
     ) -> EmptyOkResponseDto {
         let _ = auth_token;
-        SyncService::new(&self.client)
+        SyncService::new(&self.client, &self.config, &self.db)
             .remove_tag_items(&tag_id.0, body.0.items)
             .await
     }
 
     /// Archive a book (device delete)
-    #[oai(path = "/kobo/:auth_token/v1/library/:book_uuid", method = "delete")]
+    #[oai(
+        path = "/kobo/:auth_token/v1/library/:book_uuid",
+        method = "delete",
+        tag = "ApiTags::KoboSync"
+    )]
     #[tracing::instrument(level = "debug", skip(self, auth_token, book_uuid))]
     async fn archive_book(
         &self,
@@ -228,19 +272,31 @@ impl AbsKoboApi {
         book_uuid: Path<String>,
     ) -> NoContentResponseDto {
         let _ = auth_token;
-        SyncService::new(&self.client).archive(&book_uuid.0).await
+        SyncService::new(&self.client, &self.config, &self.db)
+            .archive(&book_uuid.0)
+            .await
     }
 
     /// Initialization resources
-    #[oai(path = "/kobo/:auth_token/v1/initialization", method = "get")]
+    #[oai(
+        path = "/kobo/:auth_token/v1/initialization",
+        method = "get",
+        tag = "ApiTags::KoboSync"
+    )]
     #[tracing::instrument(level = "debug", skip(self, auth_token))]
     async fn initialization(&self, auth_token: Path<String>) -> InitializationResponseDto {
         let _ = auth_token;
-        SyncService::new(&self.client).initialization().await
+        SyncService::new(&self.client, &self.config, &self.db)
+            .initialization()
+            .await
     }
 
     /// Device auth stub
-    #[oai(path = "/kobo/:auth_token/v1/auth/device", method = "post")]
+    #[oai(
+        path = "/kobo/:auth_token/v1/auth/device",
+        method = "post",
+        tag = "ApiTags::KoboSync"
+    )]
     #[tracing::instrument(level = "debug", skip(self, auth_token, body))]
     async fn auth_device(
         &self,
@@ -248,7 +304,9 @@ impl AbsKoboApi {
         Json(body): Json<serde_json::Value>,
     ) -> DeviceAuthResponseDto {
         let _ = auth_token;
-        SyncService::new(&self.client).auth_device(body).await
+        SyncService::new(&self.client, &self.config, &self.db)
+            .auth_device(body)
+            .await
     }
 }
 
@@ -277,18 +335,8 @@ impl KoboSyncToken {
     const HEADER_NAME: &'static str = "x-kobo-synctoken";
 }
 
-impl<'a> FromRequest<'a> for KoboSyncToken {
-    async fn from_request(req: &'a Request, _body: &mut RequestBody) -> poem::Result<Self> {
-        let token = match req.headers().get(KoboSyncToken::HEADER_NAME) {
-            Some(t) => t.to_str().map_err(|_| {
-                poem::Error::from_string(
-                    "Invalid Kobo sync token format",
-                    poem::http::StatusCode::BAD_REQUEST,
-                )
-            })?,
-            None => return Ok(KoboSyncToken::NoToken),
-        };
-
+impl KoboSyncToken {
+    pub fn from_request(token: &str) -> poem::Result<Self> {
         // On the first sync from a Kobo device, we may receive the SyncToken
         // from the official Kobo store. Without digging too deep into it, that
         // token is of the form [b64encoded blob].[b64encoded blob 2]

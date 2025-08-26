@@ -17,9 +17,9 @@ impl<'a> LibraryService<'a> {
         Self { client }
     }
 
-    #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn list_libraries(&self) -> LibraryListResponse {
-        match self.client.get_libraries().await {
+    #[tracing::instrument(level = "debug", skip(self, api_key))]
+    pub async fn list_libraries(&self, api_key: &String) -> LibraryListResponse {
+        match self.client.get_libraries(api_key).await {
             Ok(libs) => {
                 let dtos = libs
                     .libraries
@@ -50,10 +50,11 @@ impl<'a> LibraryService<'a> {
         page: Option<i64>,
         include: Option<&str>,
         filter: Option<&str>,
+        api_key: &String,
     ) -> LibraryItemsResponseDto {
         let res = self
             .client
-            .get_library_items(library_id, limit, page, include, filter)
+            .get_library_items(library_id, limit, page, include, filter, api_key)
             .await;
 
         match res {

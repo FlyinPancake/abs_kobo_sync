@@ -62,7 +62,7 @@ async fn main() -> AbsKoboResult<()> {
         .await
         .with_context(|| "Failed to run database migrations")?;
 
-    let client = AbsClient::new(&config.abs_base_url)?.with_api_key(&config.abs_api_key);
+    let client = AbsClient::new(&config.abs_base_url)?;
     let has_api_key = !config.abs_api_key.is_empty();
     tracing::info!(abs_base = %config.abs_base_url, has_api_key, "configured ABS client");
 

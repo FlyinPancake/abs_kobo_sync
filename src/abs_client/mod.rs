@@ -1,12 +1,12 @@
 // empty
 
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use uuid::Uuid;
 
 #[derive(Clone, Debug)]
 pub struct AbsClient {
     base_url: String,
-    api_key: Option<String>,
     client: reqwest::Client,
 }
 
@@ -18,15 +18,8 @@ impl AbsClient {
         tracing::debug!(base_url = %base_url_str, "creating AbsClient");
         Ok(AbsClient {
             base_url: base_url_str.trim_end_matches('/').to_string(),
-            api_key: None,
             client,
         })
-    }
-
-    /// Return a client with the provided API key set (Bearer)
-    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
-        self.api_key = Some(api_key.into());
-        self
     }
 
     fn url(&self, path: &str) -> String {
@@ -37,10 +30,8 @@ impl AbsClient {
         }
     }
 
-    fn auth_header(&self) -> Option<(String, String)> {
-        self.api_key
-            .as_ref()
-            .map(|k| ("Authorization".to_string(), format!("Bearer {}", k)))
+    fn auth_header(api_key: &String) -> (String, String) {
+        ("Authorization".to_string(), format!("Bearer {}", api_key))
     }
 
     /// GET /status (no auth required)
@@ -48,10 +39,7 @@ impl AbsClient {
     pub async fn get_status(&self) -> anyhow::Result<StatusResponse> {
         let url = self.url("/status");
         tracing::debug!(%url, "GET status");
-        let mut req = self.client.get(&url);
-        if let Some((k, v)) = self.auth_header() {
-            req = req.header(&k, &v);
-        }
+        let req = self.client.get(&url);
         let resp = req.send().await?;
         let status = resp.error_for_status()?;
         let body = status.text().await?;
@@ -63,9 +51,10 @@ impl AbsClient {
     #[tracing::instrument(level = "debug", skip(self))]
     pub async fn get_item(
         &self,
-        item_id: &str,
+        item_id: Uuid,
         expanded: bool,
         include: Option<&str>,
+        api_key: &String,
     ) -> anyhow::Result<ItemResponse> {
         let mut path = format!("/api/items/{}", item_id);
         let mut q = vec![];
@@ -87,9 +76,9 @@ impl AbsClient {
         let url = self.url(&path);
         tracing::debug!(%url, expanded, include = include.unwrap_or(""), "GET item");
         let mut req = self.client.get(&url);
-        if let Some((k, v)) = self.auth_header() {
-            req = req.header(&k, &v);
-        }
+        let (k, v) = Self::auth_header(api_key);
+        req = req.header(&k, &v);
+
         let resp = req.send().await?;
         let status = resp.error_for_status()?;
         let body = status.text().await?;
@@ -125,14 +114,14 @@ impl AbsClient {
     }
 
     /// GET /api/libraries
-    #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn get_libraries(&self) -> anyhow::Result<LibrariesResponse> {
+    #[tracing::instrument(level = "debug", skip(self, api_key))]
+    pub async fn get_libraries(&self, api_key: &String) -> anyhow::Result<LibrariesResponse> {
         let url = self.url("/api/libraries");
         tracing::debug!(%url, "GET libraries");
         let mut req = self.client.get(&url);
-        if let Some((k, v)) = self.auth_header() {
-            req = req.header(&k, &v);
-        }
+        let (k, v) = Self::auth_header(api_key);
+        req = req.header(&k, &v);
+
         let resp = req.send().await?;
         let status = resp.error_for_status()?;
         let body = status.text().await?;
@@ -148,14 +137,14 @@ impl AbsClient {
         limit: i64,
         page: Option<i64>,
         filter: Option<&str>,
+        api_key: &String,
     ) -> anyhow::Result<LibrarySeriesResponse> {
         let url = self.url(&format!("/api/libraries/{}/series", lib_id));
         tracing::debug!(%url, %lib_id, %limit, page = page.unwrap_or(0), filter = filter.unwrap_or("") , "GET library series");
         let req = self.client.get(&url);
-        let req = if let Some((k, v)) = self.auth_header() {
+        let req = {
+            let (k, v) = Self::auth_header(api_key);
             req.header(&k, &v)
-        } else {
-            req
         };
         let req = req.query(&[
             ("limit", limit.to_string()),
@@ -180,14 +169,14 @@ impl AbsClient {
         page: Option<i64>,
         include: Option<&str>,
         filter: Option<&str>,
+        api_key: &String,
     ) -> anyhow::Result<LibraryItemsResponse> {
         let url = self.url(&format!("/api/libraries/{}/items", lib_id));
         tracing::debug!(%url, %lib_id, %limit, page = page.unwrap_or(0), include = include.unwrap_or("") , filter = filter.unwrap_or("") , "GET library items");
         let req = self.client.get(&url);
-        let req = if let Some((k, v)) = self.auth_header() {
+        let req = {
+            let (k, v) = Self::auth_header(api_key);
             req.header(&k, &v)
-        } else {
-            req
         };
         // Build query parameters, keeping things resilient
         let mut q: Vec<(String, String)> = vec![
@@ -313,7 +302,7 @@ pub enum LibraryMediaType {
     Podcast,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryItem {
     pub id: Uuid,
@@ -344,7 +333,7 @@ pub struct LibraryItem {
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Media {
     pub id: String,
@@ -361,7 +350,7 @@ pub struct Media {
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct BookMetadata {
     pub title: Option<String>,
@@ -386,6 +375,23 @@ pub struct BookMetadata {
     pub language: Option<String>,
     pub explicit: Option<bool>,
     pub abridged: Option<bool>,
+}
+
+impl BookMetadata {
+    pub fn get_published_date(&self) -> Option<DateTime<Utc>> {
+        if let Some(date_str) = &self.published_date {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(date_str) {
+                return Some(dt.with_timezone(&Utc));
+            }
+            // Try parsing as just a year
+            if let Ok(year) = date_str.parse::<i32>() {
+                return DateTime::parse_from_rfc3339(&format!("{}-01-01T00:00:00Z", year))
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc));
+            }
+        }
+        None
+    }
 }
 
 /// Internal serde helpers

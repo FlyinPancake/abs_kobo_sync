@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
+use poem::http::HeaderMap;
 use poem_openapi::{
     OpenApi, Tags,
     param::{Header, Path, Query},
@@ -37,8 +38,6 @@ pub enum ApiTags {
     ExploreAbs,
 }
 
-const KOBO_STOREAPI_URL: &str = "https://storeapi.kobo.com";
-
 #[OpenApi]
 impl AbsKoboApi {
     /// Get the health status of the API
@@ -52,7 +51,9 @@ impl AbsKoboApi {
     #[oai(path = "/v1/libraries", method = "get", tag = "ApiTags::ExploreAbs")]
     #[tracing::instrument(level = "debug", skip(self))]
     async fn list_libraries(&self) -> LibraryListResponse {
-        LibraryService::new(&self.client).list_libraries().await
+        LibraryService::new(&self.client)
+            .list_libraries(&self.config.abs_api_key)
+            .await
     }
 
     /// List items in a library
@@ -82,7 +83,14 @@ impl AbsKoboApi {
         tracing::debug!(library_id=%library_id, limit, page = page.unwrap_or(0), include = include_ref.unwrap_or(""), filter = filter_ref.unwrap_or(""), "handling list_library_items");
 
         LibraryService::new(&self.client)
-            .list_library_items(&library_id, limit, page, include_ref, filter_ref)
+            .list_library_items(
+                &library_id,
+                limit,
+                page,
+                include_ref,
+                filter_ref,
+                &self.config.abs_api_key,
+            )
             .await
     }
 
@@ -97,11 +105,12 @@ impl AbsKoboApi {
     #[tracing::instrument(level = "debug", skip(self, auth_token, kobo_sync_token))]
     async fn kobo_sync(
         &self,
-        Path(auth_token): Path<String>,
+        Path(auth_token): Path<Uuid>,
         #[oai(name = "X-Kobo-Sync-Token")] Header(kobo_sync_token): Header<String>,
+        headers: &HeaderMap,
     ) -> SyncResponseDto {
         SyncService::new(&self.client, &self.config, &self.db)
-            .sync(&auth_token, kobo_sync_token)
+            .sync(auth_token, kobo_sync_token, headers)
             .await
     }
 
@@ -114,12 +123,11 @@ impl AbsKoboApi {
     #[tracing::instrument(level = "debug", skip(self, auth_token, book_uuid))]
     async fn book_metadata(
         &self,
-        auth_token: Path<String>,
-        book_uuid: Path<String>,
+        Path(auth_token): Path<Uuid>,
+        Path(book_uuid): Path<Uuid>,
     ) -> MetadataResponseDto {
-        let _ = auth_token;
-        MetadataService::new(&self.client)
-            .get_metadata(&book_uuid.0)
+        MetadataService::new(&self.client, &self.db)
+            .get_metadata(book_uuid, auth_token)
             .await
     }
 
@@ -322,20 +330,9 @@ pub enum KoboSyncToken {
     },
 }
 
-#[derive(Debug, Clone)]
-pub struct KoboFullTokenDetails {
-    pub books_last_modified: Option<DateTime<Utc>>,
-    pub books_last_created: Option<DateTime<Utc>>,
-    pub archive_last_modified: Option<DateTime<Utc>>,
-    pub reading_state_last_modified: Option<DateTime<Utc>>,
-    pub tags_last_modified: Option<DateTime<Utc>>,
-}
-
 impl KoboSyncToken {
-    const HEADER_NAME: &'static str = "x-kobo-synctoken";
-}
+    pub const HEADER_NAME: &'static str = "x-kobo-synctoken";
 
-impl KoboSyncToken {
     pub fn from_request(token: &str) -> poem::Result<Self> {
         // On the first sync from a Kobo device, we may receive the SyncToken
         // from the official Kobo store. Without digging too deep into it, that
@@ -414,5 +411,53 @@ impl KoboSyncToken {
                 tags_last_modified,
             },
         })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct KoboFullTokenDetails {
+    pub books_last_modified: Option<DateTime<Utc>>,
+    pub books_last_created: Option<DateTime<Utc>>,
+    pub archive_last_modified: Option<DateTime<Utc>>,
+    pub reading_state_last_modified: Option<DateTime<Utc>>,
+    pub tags_last_modified: Option<DateTime<Utc>>,
+}
+
+impl KoboFullTokenDetails {
+    pub fn to_raw_token(&self) -> String {
+        let mut map = serde_json::Map::new();
+        if let Some(dt) = self.books_last_modified {
+            map.insert(
+                "books_last_modified".to_string(),
+                serde_json::Value::String(dt.to_rfc3339()),
+            );
+        }
+        if let Some(dt) = self.books_last_created {
+            map.insert(
+                "books_last_created".to_string(),
+                serde_json::Value::String(dt.to_rfc3339()),
+            );
+        }
+        if let Some(dt) = self.archive_last_modified {
+            map.insert(
+                "archive_last_modified".to_string(),
+                serde_json::Value::String(dt.to_rfc3339()),
+            );
+        }
+        if let Some(dt) = self.reading_state_last_modified {
+            map.insert(
+                "reading_state_last_modified".to_string(),
+                serde_json::Value::String(dt.to_rfc3339()),
+            );
+        }
+        if let Some(dt) = self.tags_last_modified {
+            map.insert(
+                "tags_last_modified".to_string(),
+                serde_json::Value::String(dt.to_rfc3339()),
+            );
+        }
+
+        let value = serde_json::Value::Object(map);
+        base64::prelude::BASE64_STANDARD.encode(serde_json::to_string(&value).unwrap())
     }
 }

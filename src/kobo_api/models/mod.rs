@@ -1,3 +1,6 @@
+pub mod kobo;
+pub use kobo::*;
+
 use std::ffi::os_str::Display;
 
 use poem_openapi::{ApiResponse, Enum, Object, payload::Json};
@@ -24,6 +27,12 @@ pub struct LibraryItemDto {
 pub struct ErrorDto {
     /// Human-readable error message
     pub message: String,
+}
+
+impl From<String> for ErrorDto {
+    fn from(message: String) -> Self {
+        ErrorDto { message }
+    }
 }
 
 #[derive(ApiResponse)]
@@ -55,7 +64,8 @@ pub enum SyncResponseDto {
     /// Sync items successfully retrieved
     #[oai(status = 200)]
     Ok(
-        Json<Vec<crate::kobo_api::services::sync::KoboSyncEntitlement>>,
+        Json<Vec<kobo::KoboSyncEntitlement>>,
+        #[oai(header = "X-Kobo-SyncToken")] String,
         #[oai(header = "X-Kobo-Sync")] Option<String>,
         #[oai(header = "X-Kobo-Sync-Mode")] Option<String>,
         #[oai(header = "X-Kobo-Recent-Reads")] Option<String>,
@@ -78,7 +88,10 @@ pub enum SyncResponseDto {
 pub enum MetadataResponseDto {
     /// One metadata object wrapped in an array
     #[oai(status = 200)]
-    Ok(Json<Vec<serde_json::Value>>),
+    Ok(Json<BookMetadata>),
+
+    #[oai(status = 401)]
+    Unauthorized(Json<ErrorDto>),
 
     /// Not found or upstream error
     #[oai(status = 404)]
